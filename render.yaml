@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: skillspad-backend
+    env: node
+    buildCommand: npm install --force
+    startCommand: node src/server.js
+    envVars:
+      - key: NODE_VERSION
+        value: 18.x
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: MONGO_URI
+        fromDatabase:
+          name: skillspad-db
+          property: connectionString
+    autoDeploy: true
+
+databases:
+  - name: skillspad-db
+    databaseName: skillspad
+    user: skillspad_user
+    plan: free
