@@ -3,7 +3,7 @@ services:
     name: skillspad-backend
     env: node
     buildCommand: npm install --force
-    startCommand: node src/server.js
+    startCommand: npm start
     envVars:
       - key: NODE_VERSION
         value: 18.x
