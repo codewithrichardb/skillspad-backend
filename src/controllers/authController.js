@@ -4,28 +4,32 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { sendWelcomeEmail, sendPasswordResetEmail } from "../../lib/email.js";
 import { v4 as uuidv4 } from 'uuid';
+import { ObjectId } from 'mongodb';
 
-// Helper function to detect country from request
-const detectCountryFromRequest = async (req) => {
-    try {
-        // Try to get country from frontend (if already detected)
-        if (req.body.country) return req.body.country;
-        
-        // If not provided, try to detect from IP
-        const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-        if (ip) {
-            const response = await fetch(`http://ip-api.com/json/${ip}?fields=countryCode`);
-            const data = await response.json();
-            return data.countryCode || 'GH'; // Default to Ghana if detection fails
-        }
-    } catch (error) {
-        console.error('Error detecting country:', error);
-    }
-    return 'GH'; // Default to Ghana if all else fails
-};
+
 
 export const apply = async (req, res) => {
+    console.log('Received request body:', req.body);
     try {
+        // Create a new object with only the properties we need
+        const requestBody = {
+            email: req.body?.email,
+            password: req.body?.password,
+            firstName: req.body?.firstName,
+            lastName: req.body?.lastName,
+            phone: req.body?.phone || "",
+            education: req.body?.education || "",
+            experience: req.body?.experience || "",
+            motivation: req.body?.motivation || "",
+            howHeard: req.body?.howHeard || "",
+            startDate: req.body?.startDate || "",
+            githubProfile: req.body?.githubProfile || "",
+            country: req.body?.country || "GH"
+        };
+        
+        console.log('Processed request body:', requestBody);
+        
+        // Destructure with defaults
         const {
             email,
             password,
@@ -38,12 +42,9 @@ export const apply = async (req, res) => {
             howHeard = "",
             startDate = "",
             githubProfile = "",
-            country: frontendCountry
-        } = req.body;
-        
-        // Detect country if not provided in request
-        const country = frontendCountry || await detectCountryFromRequest(req);
-
+            country = "GH" // Default to Ghana if not provided
+        } = requestBody;
+    
         if (!email || !password || !firstName || !lastName) {
             return res.status(400).json({ message: "Missing required fields" });
         }
@@ -83,26 +84,13 @@ export const apply = async (req, res) => {
         };
 
         const result = await users.insertOne(newUser);
-        const userId = result.insertedId;
-        
-        // Send welcome email
-        try {
-            const origin = req.headers.origin || 'https://skillspad.vercel.app';
-            await sendWelcomeEmail({
-                name: `${firstName} ${lastName}`,
-                email
-            }, origin);
-        } catch (emailError) {
-            console.error('Failed to send welcome email:', emailError);
-            // Don't fail the registration if email sending fails
-        }
 
         // Generate JWT token with user info including country
         const token = jwt.sign(
             { 
                 email: newUser.email, 
                 role: newUser.role, 
-                userId: result.insertedId,
+                userId: result.insertedId.toString(), // Ensure userId is a string
                 country: newUser.country || 'GH' // Include country in token
             }, 
             process.env.JWT_SECRET,
@@ -114,7 +102,7 @@ export const apply = async (req, res) => {
             httpOnly: true,
             secure: process.env.NODE_ENV === 'production',
             sameSite: 'strict',
-            maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+            maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days,
         });
 
         // Return success response with user data (without password)
@@ -148,6 +136,7 @@ export const login = async (req, res) => {
 
         const db = await connectDB();
         const users = db.collection("users");
+        const transactions = db.collection("transactions");
         
         // Find user by email
         const user = await users.findOne({ email });
@@ -167,8 +156,16 @@ export const login = async (req, res) => {
             });
         }
 
+        //find if user has made payment
+        const existingPayment = await transactions.findOne({
+            userId: user._id.toString(),
+            status: 'success'
+        });
+
+        console.log(existingPayment)
+
         // Check for partial payments if user doesn't have a success status
-        let paymentStatus = user.payment?.status || 'pending';
+        let paymentStatus = existingPayment?.status || 'pending';
         if (paymentStatus !== 'success') {
             const partialPayment = await db.collection('partial_payments').findOne({
                 userId: user._id,
@@ -185,9 +182,9 @@ export const login = async (req, res) => {
             { 
                 email: user.email, 
                 role: user.role, 
-                userId: user._id,
-                country: user.country || 'GH', // Include country in token
-                paymentStatus // Include payment status in token
+                userId: user._id.toString(), 
+                country: user.country || 'GH', 
+                paymentStatus 
             }, 
             process.env.JWT_SECRET,
             { expiresIn: '7d' }
@@ -205,14 +202,14 @@ export const login = async (req, res) => {
         const { password: _, ...userWithoutPassword } = {
             ...user,
             payment: {
-                ...user.payment,
                 status: paymentStatus
             }
         };
         return res.status(200).json({
             success: true,
             message: 'Login successful',
-            user: userWithoutPassword
+            user: userWithoutPassword,
+            payment: {status: existingPayment?.status || 'pending'}
         });
 
     } catch (error) {
@@ -396,6 +393,116 @@ export const resetPassword = async (req, res) => {
         return res.status(500).json({
             success: false,
             message: 'Error resetting password',
+            error: error.message
+        });
+    }
+};
+
+/**
+ * Get current authenticated user's profile
+ */
+export const getCurrentUser = async (req, res) => {
+    try {
+        const db = await connectDB();
+        const user = await db.collection('users').findOne(
+            { _id: new ObjectId(req.user.userId) },
+            { projection: { password: 0 } } // Exclude password from the response
+        );
+
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            data: user
+        });
+    } catch (error) {
+        console.error('Error fetching user profile:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to fetch user profile',
+            error: error.message
+        });
+    }
+};
+
+/**
+ * Update user profile
+ */
+export const updateProfile = async (req, res) => {
+    try {
+        const { firstName, lastName, phone, education, country, currentPassword, newPassword } = req.body;
+        const db = await connectDB();
+        
+        // Get the current user
+        const user = await db.collection('users').findOne({ _id: new ObjectId(req.user.userId) });
+        
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        // Prepare update object
+        const updateData = {};
+        
+        // Update basic profile fields if provided
+        if (firstName) updateData.firstName = firstName;
+        if (lastName) updateData.lastName = lastName;
+        if (phone) updateData.phone = phone;
+        if (education) updateData.education = education;
+        if (country) updateData.country = country;
+
+        // Handle password change if requested
+        if (currentPassword && newPassword) {
+            const isMatch = await bcrypt.compare(currentPassword, user.password);
+            if (!isMatch) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Current password is incorrect'
+                });
+            }
+            
+            // Hash the new password
+            const salt = await bcrypt.genSalt(10);
+            updateData.password = await bcrypt.hash(newPassword, salt);
+        }
+
+        // Update the user
+        const result = await db.collection('users').updateOne(
+            { _id: new ObjectId(req.user.userId) },
+            { $set: updateData }
+        );
+
+        if (result.matchedCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        // Get updated user data (excluding password)
+        const updatedUser = await db.collection('users').findOne(
+            { _id: new ObjectId(req.user.userId) },
+            { projection: { password: 0 } }
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: 'Profile updated successfully',
+            data: updatedUser
+        });
+
+    } catch (error) {
+        console.error('Error updating profile:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to update profile',
             error: error.message
         });
     }

@@ -4,13 +4,18 @@ import { authMiddleware } from '../middlewares/auth.js';
 
 const router = express.Router();
 
-// Apply auth middleware to all payment routes
-router.use(authMiddleware());
+// Initialize payment - protected endpoint (requires auth)
+router.post('/initialize', authMiddleware(), initializePayment);
 
-// Initialize payment (frontend expects POST /api/paystack/initialize)
-router.post('/initialize', initializePayment);
-
-// Verify payment (frontend will be redirected here after payment)
+// Verify payment - public endpoint (called by Paystack)
 router.get('/verify', verifyPayment);
+
+// Add webhook endpoint for Paystack to call
+router.post('/webhook', (req, res) => {
+  // This is a placeholder for webhook handling
+  // You can implement webhook verification here if needed
+  console.log('Webhook received:', req.body);
+  res.status(200).json({ received: true });
+});
 
 export default router;

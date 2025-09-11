@@ -88,8 +88,25 @@ const getAssignments = async (req, res) => {
     try {
         const db = await connectDB();
         
-        // Get all assignments with additional data
-        const assignments = await db.collection('assignments').aggregate([
+        // Build match stage for filtering
+        const matchStage = {};
+        if (req.convertedQuery.courseId) {
+            matchStage.courseId = req.convertedQuery.courseId;
+        }
+        if (req.convertedQuery.moduleId) {
+            matchStage.moduleId = req.convertedQuery.moduleId;
+        }
+        
+        // Create pipeline
+        const pipeline = [];
+        
+        // Add match stage if we have filters
+        if (Object.keys(matchStage).length > 0) {
+            pipeline.push({ $match: matchStage });
+        }
+        
+        // Add lookup and project stages
+        pipeline.push(
             {
                 $lookup: {
                     from: 'courses',
@@ -124,7 +141,10 @@ const getAssignments = async (req, res) => {
                     updatedAt: 1
                 }
             }
-        ]).toArray();
+        );
+        
+        // Execute aggregation
+        const assignments = await db.collection('assignments').aggregate(pipeline).toArray();
         
         return res.status(200).json({
             success: true,

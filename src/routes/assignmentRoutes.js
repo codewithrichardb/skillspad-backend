@@ -28,14 +28,20 @@ const convertToObjectId = (req, res, next) => {
     req.params.id = new ObjectId(req.params.id);
   }
   
+  // Create a new object for converted query params
+  const convertedQuery = { ...req.query };
+  
   // Convert courseId and moduleId in query params if they exist
   if (req.query.courseId && ObjectId.isValid(req.query.courseId)) {
-    req.query.courseId = new ObjectId(req.query.courseId);
+    convertedQuery.courseId = new ObjectId(req.query.courseId);
   }
   
   if (req.query.moduleId && ObjectId.isValid(req.query.moduleId)) {
-    req.query.moduleId = new ObjectId(req.query.moduleId);
+    convertedQuery.moduleId = new ObjectId(req.query.moduleId);
   }
+  
+  // Attach converted query to request object
+  req.convertedQuery = convertedQuery;
   
   next();
 };

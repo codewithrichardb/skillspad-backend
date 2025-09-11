@@ -1,250 +1,273 @@
-import Paystack from 'paystack';
-import connectDB from '../../lib/mongodb.js';
-import jwt from 'jsonwebtoken';
-import { sendPaymentConfirmationEmail } from '../../lib/email.js';
+// controllers/paymentController.js
+import axios from "axios";
+import connectDB from "../../lib/mongodb.js";
+import jwt from "jsonwebtoken";
+import {
+  sendPaymentConfirmationEmail,
+  sendWelcomeEmail,
+} from "../../lib/email.js";
+import { ObjectId } from "mongodb";
 
-const paystack = Paystack(process.env.PAYSTACK_SECRET_KEY);
+const PAYSTACK_BASE = "https://api.paystack.co";
 
-export const initializePayment = async (req, res) => {
-    try {
-        const { email, amount, courseId, paymentMethod = 'mobile_money' } = req.body;
-        
-        // Set currency to GHS (Ghanaian Cedi)
-        // Paystack will automatically show available payment methods based on this currency
-        const currency = 'GHS';
-        
-        // Convert amount to the smallest currency unit (pesewas for GHS)
-        // 1 GHS = 100 pesewas
-        const amountInPesewas = Math.round(amount * 100);
-        
-        // Check if payment already exists for this user and course
-        const db = await connectDB();
-        const existingPayment = await db.collection('transactions').findOne({
-            userId: req.user.userId,
-            courseId,
-            status: { $in: ['success', 'pending'] }
-        });
+// Helper for Paystack requests
+const paystackRequest = async (path, method = "GET", body = null) => {
+  const isLive = process.env.NODE_ENV === "production";
+  const key = isLive
+    ? process.env.PAYSTACK_SECRET_KEY_LIVE
+    : process.env.PAYSTACK_SECRET_KEY_TEST;
 
-        // If payment exists and is successful, redirect to dashboard
-        if (existingPayment?.status === 'success') {
-            return res.json({
-                status: 'already_paid',
-                redirectUrl: '/student/dashboard'
-            });
-        }
+  if (!key) throw new Error("Paystack API key not configured");
 
-        // If payment exists but is pending, return the existing payment URL
-        if (existingPayment?.status === 'pending' && existingPayment?.authorizationUrl) {
-            return res.json({
-                status: 'pending_payment',
-                authorization_url: existingPayment.authorizationUrl
-            });
-        }
+  const config = {
+    method,
+    url: `${PAYSTACK_BASE}${path}`,
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+    data: body || undefined,
+    timeout: 30000,
+  };
 
-        // Create new transaction record
-        const paymentRecord = {
-            userId: req.user.userId,
-            email,
-            courseId,
-            amount: amountInPesewas,
-            currency: 'GHS',
-            paymentMethod,
-            status: 'pending',
-            createdAt: new Date(),
-            updatedAt: new Date()
-        };
-
-        // Validate payment method
-        const validPaymentMethods = ['mobile_money', 'card'];
-        if (!validPaymentMethods.includes(paymentMethod)) {
-            return res.status(400).json({
-                status: 'error',
-                message: 'Invalid payment method. Please use either mobile_money or card.'
-            });
-        }
-
-        // Initialize payment with Paystack
-        // Paystack will automatically show available payment methods based on the currency
-        const paymentDetails = {
-            email,
-            amount: amountInPesewas,
-            currency: currency,
-            metadata: {
-                userId: req.user.userId,
-                courseId,
-                paymentMethod,
-                userCountry: req.user.country || 'GH',
-                currency: currency
-            },
-            // Let Paystack handle the available payment methods based on the currency
-            // We still pass the paymentMethod to track it in our system
-            channels: [paymentMethod],
-            callback_url: `${process.env.FRONTEND_URL}/apply/success`,
-            reference: `PAY-${Date.now()}-${Math.floor(Math.random() * 1000)}`
-        };
-
-        const response = await paystack.transaction.initialize(paymentDetails);
-        
-        // Update payment record with Paystack reference and authorization URL
-        paymentRecord.paymentReference = response.data.reference;
-        paymentRecord.authorizationUrl = response.data.authorization_url;
-        
-        // Save transaction record to database
-        await db.collection('transactions').insertOne(paymentRecord);
-        
-        return res.json({
-            status: 'pending_payment',
-            authorization_url: response.data.authorization_url
-        });
-        
-    } catch (error) {
-        console.error('Payment initialization error:', error);
-        return res.status(500).json({
-            status: 'error',
-            message: 'Failed to initialize payment',
-            error: error.message
-        });
-    }
+  const response = await axios(config);
+  if (!response.data.status) {
+    throw new Error(response.data.message || "Invalid response from Paystack");
+  }
+  return response.data.data;
 };
 
+// ==============================
+// Initialize Payment
+// ==============================
+export const initializePayment = async (req, res) => {
+  try {
+    const { email, amount, courseId, paymentMethod = "mobile_money" } = req.body;
+    const userId = req.user?.userId;
+
+    if (!userId || !email || !amount || !courseId) {
+      return res
+        .status(400)
+        .json({ status: "error", message: "Missing required fields" });
+    }
+
+    const currency = "GHS";
+    const amountInPesewas = Math.round(amount * 100);
+
+    const db = await connectDB();
+
+    //if user has already made payment
+    const existingPayment = await db.collection("transactions").findOne({
+      userId,
+      courseId,
+      status: "success",
+    });
+    if (existingPayment) {
+      return res.status(400).json({
+        status: "error",
+        message: "You have already made payment for this course",
+      });
+    }
+
+    // Generate unique reference
+    const reference = `PAY-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    console.log("🆕 Generated reference:", reference);
+
+    // Payload for Paystack
+    const payload = {
+      email,
+      amount: amountInPesewas,
+      currency,
+      metadata: {
+        userId: userId.toString(),
+        courseId: courseId.toString(),
+        paymentMethod,
+      },
+      channels: [paymentMethod],
+      callback_url: `${process.env.FRONTEND_URL}/payment/verify`, // let Paystack append reference
+      reference,
+    };
+
+    // Call Paystack
+    const data = await paystackRequest("/transaction/initialize", "POST", payload);
+
+    console.log("✅ Paystack Init Reference:", data.reference);
+    console.log("✅ Paystack Auth URL:", data.authorization_url);
+
+    // Save to DB
+    const record = {
+      userId: new ObjectId(userId),
+      email,
+      courseId,
+      amount: amountInPesewas,
+      currency,
+      paymentMethod,
+      status: "pending",
+      paymentReference: data.reference,
+      authorizationUrl: data.authorization_url,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const result = await db.collection("transactions").insertOne(record);
+    console.log("💾 Saved DB Reference:", record.paymentReference, "ID:", result.insertedId);
+
+    return res.json({
+      status: "pending_payment",
+      authorization_url: data.authorization_url,
+      reference: data.reference,
+    });
+  } catch (error) {
+    console.error("Payment init error:", error.message, error.response?.data);
+    return res
+      .status(500)
+      .json({ status: "error", message: "Payment initialization failed" });
+  }
+};
+
+// ==============================
+// Verify Payment
+// ==============================
 export const verifyPayment = async (req, res) => {
     try {
-        const { reference, trxref } = req.query;
-        const paymentReference = reference || trxref;
-        
-        if (!paymentReference) {
-            return res.status(400).json({
-                status: 'error',
-                message: 'Payment reference is required'
-            });
-        }
-
-        // Verify payment with Paystack
-        const response = await paystack.transaction.verify(paymentReference);
-        const db = await connectDB();
-        
-        // Find the transaction record
-        const payment = await db.collection('transactions').findOne({
-            paymentReference: paymentReference
+      const paymentReference = req.query.reference;
+  
+      if (!paymentReference) {
+        return res.status(400).json({
+          ok: false,
+          status: "error",
+          message: "Payment reference required",
         });
+      }
+  
+      const db = await connectDB();
+      const data = await paystackRequest(
+        `/transaction/verify/${paymentReference}`,
+        "GET"
+      );
+  
+      const payment = await db
+        .collection("transactions")
+        .findOne({ paymentReference });
+  
+      if (!payment) {
+        return res.status(404).json({
+          ok: false,
+          status: "error",
+          message: "Payment record not found",
+        });
+      }
 
-        if (!payment) {
-            return res.status(404).json({
-                status: 'error',
-                message: 'Payment record not found'
-            });
+      console.log("Payment record found:", payment)
+  
+      if (data.status === "success") {
+        await db.collection("transactions").updateOne(
+          { paymentReference },
+          { $set: { status: "success", updatedAt: new Date() } }
+        );
+
+        // First, get the user details
+        const user = await db.collection('users').findOne({ _id: new ObjectId(payment.userId) });
+        if (!user) {
+          throw new Error('User not found');
         }
 
-        // Update payment status based on Paystack response
-        if (response.data.status === 'success') {
-            // Update transaction status to success
-            await db.collection('transactions').updateOne(
-                { paymentReference: paymentReference },
-                { 
-                    $set: { 
-                        status: 'success',
-                        updatedAt: new Date()
-                    } 
-                }
-            );
+        // Update user's enrolled courses
+        await db.collection("users").updateOne(
+          { _id: new ObjectId(payment.userId) },
+          { $addToSet: { enrolledCourses: new ObjectId(payment.courseId) } }
+        );
+  
+        // Generate new JWT token with updated user data
+        const token = jwt.sign(
+          { 
+            userId: payment.userId, 
+            role: user.role,  
+            email: user.email, 
+            country: user.country || 'GH'
+          },
+          process.env.JWT_SECRET,
+          { expiresIn: "7d" }
+        );
+  
+        // Set HTTP-only cookie
+        res.cookie("token", token, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: "lax",
+          maxAge: 7 * 24 * 60 * 60 * 1000,
+        });
+  
+        console.log("🎉 Payment verified & cookie issued:", paymentReference);
+        const course = await db.collection('courses').findOne({ _id: payment.courseId });
 
-            // Enroll user in the course
-            const enrollment = {
-                userId: payment.userId,
-                courseId: payment.courseId,
-                transactionId: payment._id,
-                enrolledAt: new Date(),
-                status: 'active'
-            };
-
-            await db.collection('enrollments').insertOne(enrollment);
-
-            // Get course details for email
-            const course = await db.collection('courses').findOne({ _id: payment.courseId });
-            const user = await db.collection('users').findOne({ _id: payment.userId });
-
-            // Send payment confirmation email
-            try {
-                const origin = req.headers.origin || 'https://skillspad.vercel.app';
-                await sendPaymentConfirmationEmail(
-                    { 
-                        name: user?.firstName ? `${user.firstName} ${user.lastName || ''}`.trim() : 'Student',
-                        email: user?.email || payment.email 
-                    },
-                    {
-                        title: course?.title || 'Your Course',
-                        amount: payment.amount / 100,
-                        currency: payment.currency || 'GHS'
-                    },
-                    origin
-                );
-            } catch (emailError) {
-                console.error('Failed to send payment confirmation email:', emailError);
-                // Don't fail the payment if email sending fails
-            }
-
-            // Update user's payment status
-            await db.collection('users').updateOne(
-                { _id: payment.userId },
-                {
-                    $set: {
-                        'payment.status': 'success',
-                        'payment.paidAt': new Date(),
-                        'payment.courseId': payment.courseId,
-                        updatedAt: new Date()
-                    },
-                    $addToSet: { enrolledCourses: payment.courseId }
-                }
-            );
-
-            // Get user and update payment status
-            const userData = await db.collection('users').findOne({ _id: payment.userId });
-            
-            if (!userData) {
-                return res.status(404).json({
-                    success: false,
-                    message: 'User not found'
-                });
-            }
-
-            // Generate JWT token with updated user data
-            const token = jwt.sign(
-                { 
-                    userId: userData._id, 
-                    email: userData.email, 
-                    role: userData.role 
-                }, 
-                process.env.JWT_SECRET,
-                { expiresIn: '7d' }
-            );
-
-            // Set token in HTTP-only cookie
-            res.cookie('token', token, {
-                httpOnly: true,
-                secure: process.env.NODE_ENV === 'production',
-                sameSite: 'strict',
-                maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+        // Send payment confirmation email
+        if (user?.email) {
+          try {
+             sendPaymentConfirmationEmail({
+              email: user.email,
+              name: user.name || 'Student',
+              courseName: course?.title || 'the course',
+              amount: payment.amount / 100, // Convert from kobo to Naira/GHC
+              reference: paymentReference,
+              paymentDate: new Date().toLocaleDateString(),
+            }).then(() => {
+              console.log("✅ Payment confirmation email sent");
+            }).catch((emailError) => {
+              console.error('Error sending email:', emailError);
             });
 
-            // Redirect to success page or dashboard
-            return res.redirect(`${process.env.FRONTEND_URL}/apply/success?payment=success`);
-        } else {
-            // Update payment as failed
-            await db.collection('payments').updateOne(
-                { _id: payment._id },
-                {
-                    $set: {
-                        status: 'failed',
-                        updatedAt: new Date(),
-                        paymentDetails: response.data
-                    }
-                }
-            );
+            // If this is the user's first payment, send welcome email
+            const userPayments = await db.collection('transactions').countDocuments({
+              userId: payment.userId,
+              status: 'success'
+            });
 
-            return res.redirect(`${process.env.FRONTEND_URL}/apply/success?payment=failed`);
+            if (userPayments === 1) {
+              sendWelcomeEmail({
+                email: user.email,
+                name: user.name || 'Student',
+                courseName: course?.title || 'your course'
+              }).then(() => {
+                console.log("✅ Welcome email sent");
+              }).catch((emailError) => {
+                console.error('Error sending email:', emailError);
+              });
+            }
+          } catch (emailError) {
+            console.error('Error sending email:', emailError);
+            // Don't fail the request if email fails
+          }
         }
+
+        // ✅ Send JSON response
+        return res.json({
+          ok: true,
+          status: "success",
+          message: "Payment verified successfully",
+          data,
+        });
+      } else {
+        await db.collection("transactions").updateOne(
+          { paymentReference },
+          { $set: { status: "failed", updatedAt: new Date() } }
+        );
+  
+        return res.json({
+          ok: true,
+          status: "failed",
+          message: "Payment verification failed",
+          data,
+        });
+      }
     } catch (error) {
-        console.error('Payment verification error:', error);
-        return res.redirect(`${process.env.FRONTEND_URL}/apply/success?payment=error`);
+      console.error("Payment verify error:", error.message, error.response?.data);
+  
+      return res.status(500).json({
+        ok: false,
+        status: "error",
+        message: error.message || "Payment verification failed",
+      });
     }
-};
+  };
+  
+

@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import connectDB from '../../lib/mongodb.js';
+import { ObjectId } from 'mongodb';
 
 /**
  * Middleware to authenticate requests using JWT
@@ -11,7 +12,7 @@ export const authMiddleware = (roles = []) => {
         try {
             // Get token from header or cookie
             let token = req.headers.authorization?.split(' ')[1] || req.cookies?.token;
-            
+         
             if (!token) {
                 return res.status(401).json({
                     success: false,
@@ -21,10 +22,12 @@ export const authMiddleware = (roles = []) => {
 
             // Verify token
             const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        
             
             // Check if user exists in database
             const db = await connectDB();
-            const user = await db.collection('users').findOne({ _id: decoded.userId });
+            const userId = ObjectId.isValid(decoded.userId) ? new ObjectId(decoded.userId) : decoded.userId;
+            const user = await db.collection('users').findOne({ _id: userId });
             
             if (!user) {
                 return res.status(401).json({
@@ -34,7 +37,7 @@ export const authMiddleware = (roles = []) => {
             }
             
             // Check if user has required role
-            if (roles.length && !roles.includes(user.role)) {
+            if (roles.length > 0 && !roles.includes(user.role)) {
                 return res.status(403).json({
                     success: false,
                     message: 'You do not have permission to access this resource.'
@@ -42,7 +45,13 @@ export const authMiddleware = (roles = []) => {
             }
 
             // Add user to request object
-            req.user = user;
+            req.user = {
+                userId: user._id.toString(),
+                email: user.email,
+                role: user.role,
+                country: user.country,
+            };
+            console.log("user", req.user)
             next();
         } catch (error) {
             console.error('Authentication error:', error);
@@ -65,16 +74,25 @@ export const authMiddleware = (roles = []) => {
 /**
  * Middleware to check if user is authenticated (for optional auth routes)
  */
-export const optionalAuth = (req, res, next) => {
+export const optionalAuth = async (req, res, next) => {
     try {
         const token = req.headers.authorization?.split(' ')[1] || req.cookies?.token;
         if (token) {
             const decoded = jwt.verify(token, process.env.JWT_SECRET);
-            req.user = decoded;
+            console.log("decoded", decoded)
+            // Verify user exists in database
+            const db = await connectDB();
+            const userId = ObjectId.isValid(decoded.userId) ? new ObjectId(decoded.userId) : decoded.userId;
+            const user = await db.collection('users').findOne({ _id: userId });
+            
+            if (user) {
+                req.user = user;
+            }
         }
         next();
     } catch (error) {
         // If token is invalid, just continue without setting req.user
+        console.error('Optional auth error:', error);
         next();
     }
 };

@@ -21,14 +21,16 @@ import { validateModule, validateLesson } from '../middlewares/validation.js';
 
 const router = express.Router();
 
-// Apply auth middleware to all routes with admin role requirement
+// Public routes
+router.get('/', getCourses);
+router.get('/:id', getCourseById);
+
+// Protected routes (admin only)
 router.use(authMiddleware(['admin']));
 
 // Course routes
 router.post('/', createCourse);
-router.get('/', getCourses);
 router.route('/:id')
-  .get(getCourseById)
   .put(updateCourse)
   .delete(deleteCourse);
 
